@@ -1,84 +1,88 @@
 import streamlit as st
 import pandas as pd
-import re
-from pypdf import PdfReader
+import pdfplumber
 
-def extrair_texto_pdf(arquivo_pdf):
-    """Lê o arquivo PDF e converte as páginas em texto."""
-    leitor = PdfReader(arquivo_pdf)
-    texto_completo = ""
-    for pagina in leitor.pages:
-        texto_extraido = pagina.extract_text()
-        if texto_extraido:
-            texto_completo += texto_extraido + "\n"
-    return texto_completo
+SIGLAS = {
+    'BIO': 'Biologia', 'ED.F': 'Ed. Física', 'ED.F.': 'Ed. Física',
+    'PORT': 'Português', 'ART': 'Artes', 'MAT': 'Matemática',
+    'GEO': 'Geografia', 'SOC': 'Sociologia', 'HIST': 'História',
+    'FIL': 'Filosofia', 'ING': 'Inglês', 'FIS': 'Física',
+    'QUI': 'Química', 'ESP': 'Espanhol', 'BIOLOGIA': 'Biologia'
+}
 
-def extrair_grade_turma(texto_pdf, turma):
-    """Busca o bloco de texto específico de uma turma e estrutura os horários."""
-    padrao_inicio = f"Turma: {turma}"
-    inicio_idx = texto_pdf.find(padrao_inicio)
+def extrair_horario_inteligente(arquivo_pdf, turma_alvo):
+    dias = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta"]
+    resultado = []
     
-    if inicio_idx == -1:
-        return None
-        
-    texto_isolado = texto_pdf[inicio_idx:]
-    proxima_turma_idx = texto_isolado.find("Turma:", 10)
-    
-    if proxima_turma_idx != -1:
-        texto_isolado = texto_isolado[:proxima_turma_idx]
-
-    horarios = ["13:00", "13:45", "14:30", "15:30", "16:15", "17:00"]
-    dias_semana = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta"]
-    
-    grade = {dia: [] for dia in dias_semana}
-    grade["Horário"] = horarios
-    
-    for horario in horarios:
-        # Busca o horário e tenta capturar as matérias na mesma linha
-        padrao_linha = f"{horario}(.*)"
-        match = re.search(padrao_linha, texto_isolado)
-        
-        if match:
-            # Limpa a linha e separa as palavras
-            linha_suja = match.group(1).replace('|', ' ')
-            # Remove palavras muito curtas ou lixo de formatação
-            materias = [m.strip() for m in linha_suja.split() if len(m.strip()) > 1]
+    with pdfplumber.open(arquivo_pdf) as pdf:
+        for page in pdf.pages:
+            texto = page.extract_text()
+            if not texto or f"Turma: {turma_alvo}" not in texto:
+                continue
             
-            for i in range(5):
-                if i < len(materias):
-                    grade[dias_semana[i]].append(materias[i])
-                else:
-                    grade[dias_semana[i]].append("Verificar PDF")
-        else:
-            for dia in dias_semana:
-                grade[dia].append("Verificar PDF")
+            tabelas = page.extract_tables()
+            for tabela in tabelas:
+                # Verifica se é o cabeçalho correto
+                if not tabela or not tabela[0] or "Hor" not in str(tabela[0][0]):
+                    continue
+                    
+                for linha in tabela[1:]:
+                    texto_horario = str(linha[0]) if linha[0] else ""
+                    horarios = [h.strip() for h in texto_horario.split("\n") if ":" in h]
+                    
+                    for index_horario, h in enumerate(horarios):
+                        linha_formatada = {"Horário": h}
+                        
+                        for i, dia in enumerate(dias):
+                            col = i + 1
+                            celula = str(linha[col]) if col < len(linha) and linha[col] else ""
+                            
+                            # Limpa os espaços em branco extras dentro da célula
+                            linhas_celula = [x.strip() for x in celula.split("\n") if x.strip()]
+                            
+                            # Lógica à prova de falhas: Matéria fica na linha PAR, Professor na linha ÍMPAR
+                            idx_materia = index_horario * 2
+                            idx_prof = idx_materia + 1
+                            
+                            # Tenta pegar a matéria e o professor; se falhar, usa um padrão
+                            materia_crua = linhas_celula[idx_materia] if idx_materia < len(linhas_celula) else "Livre"
+                            prof_cru = linhas_celula[idx_prof] if idx_prof < len(linhas_celula) else "Não Informado"
+                            
+                            sigla = materia_crua.split(" ")[0].upper()
+                            
+                            if sigla and sigla != "LIVRE":
+                                materia_nome = SIGLAS.get(sigla, materia_crua.title())
+                                # Força a união com a barra "|" para o React conseguir separar depois
+                                linha_formatada[dia] = f"{materia_nome} | {prof_cru.title()}"
+                            else:
+                                linha_formatada[dia] = "Livre"
+                        
+                        resultado.append(linha_formatada)
+                
+                if resultado:
+                    return pd.DataFrame(resultado)
+    return None
 
-    df = pd.DataFrame(grade)
-    df = df[["Horário", "Segunda", "Terça", "Quarta", "Quinta", "Sexta"]]
-    return df
-
-# --- Interface Streamlit ---
 st.set_page_config(page_title="Leitor de Horário Escolar", layout="centered")
 
-st.title("📚 Extrator de Horários")
-st.write("Faça o upload do seu PDF de horários para filtrar a grade da sua sala.")
+# Lembre-se de colocar o link do seu site principal aqui!
+st.link_button("⬅️ Voltar para o App Principal", "https://app-organizacao-escolar.vercel.app/")
 
-# Novo componente: Upload de Arquivo
+st.title("📚 Extrator de Horários Automático")
+st.write("Arraste seu PDF gerado pelo Urania. O sistema mapeará as matérias e os professores automaticamente.")
+
 arquivo_enviado = st.file_uploader("Arraste e solte o seu PDF aqui", type=["pdf"])
-
-turma_selecionada = st.selectbox("Qual é a sua turma?", ["104", "105", "106", "107", "108", "109", "206", "207", "208", "209", "305", "306"])
+turma_selecionada = st.selectbox("Selecione sua Turma:", [
+    "104", "105", "106", "107", "108", "109", "206", "207", "208", "209", "305", "306"
+])
 
 if st.button("Extrair Meu Horário"):
     if arquivo_enviado is not None:
-        with st.spinner('Lendo o arquivo PDF...'):
-            # Transforma o PDF em texto
-            texto_extraido = extrair_texto_pdf(arquivo_enviado)
+        with st.spinner('Analisando as grades do PDF...'):
+            df_horario = extrair_horario_inteligente(arquivo_enviado, turma_selecionada)
             
-            # Processa o texto
-            df_horario = extrair_grade_turma(texto_extraido, turma_selecionada)
-            
-            if df_horario is not None:
-                st.success(f"Horário da Turma {turma_selecionada} encontrado!")
+            if df_horario is not None and not df_horario.empty:
+                st.success(f"🎉 Horário da Turma {turma_selecionada} mapeado!")
                 st.dataframe(df_horario, use_container_width=True)
                 
                 st.download_button(
@@ -88,6 +92,6 @@ if st.button("Extrair Meu Horário"):
                     mime="application/json"
                 )
             else:
-                st.error("Turma não encontrada no PDF. Verifique se o arquivo está correto.")
+                st.error("Turma não encontrada ou PDF com formato inválido.")
     else:
-        st.warning("Por favor, envie um arquivo PDF primeiro.")
+        st.warning("Envie o arquivo PDF primeiro!")
