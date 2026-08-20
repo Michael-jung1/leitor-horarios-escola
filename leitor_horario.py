@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 
+# Dicionário inteligente para identificar quem é Matéria e quem é Professor
 SIGLAS = {
     'BIO': 'Biologia', 'ED.F': 'Ed. Física', 'ED.F.': 'Ed. Física',
     'PORT': 'Português', 'ART': 'Artes', 'MAT': 'Matemática',
@@ -10,9 +11,44 @@ SIGLAS = {
     'QUI': 'Química', 'ESP': 'Espanhol', 'BIOLOGIA': 'Biologia'
 }
 
+def parse_cell(texto):
+    """Analisa o texto do quadradinho e separa Matéria de Professor com precisão."""
+    linhas = [x.strip() for x in str(texto).split('\n') if x.strip()]
+    pares = []
+    materia_atual = None
+    prof_atual = []
+    
+    for linha in linhas:
+        sigla = linha.split(" ")[0].upper()
+        # Se a linha começa com uma sigla, é uma matéria
+        if sigla in SIGLAS or sigla == "LIVRE":
+            if materia_atual is not None:
+                pares.append((materia_atual, " ".join(prof_atual).strip()))
+            materia_atual = SIGLAS.get(sigla, "Livre")
+            prof_atual = []
+            
+            # Caso a matéria e o professor venham colados na mesma linha (ex: "ART CAREM")
+            resto = linha[len(sigla):].strip()
+            if resto:
+                prof_atual.append(resto)
+        else:
+            # Se não é sigla, com certeza é o nome do professor
+            if materia_atual is not None:
+                prof_atual.append(linha)
+            else:
+                pares.append(("", linha)) # Professor que vazou da linha de cima
+                
+    if materia_atual is not None:
+        pares.append((materia_atual, " ".join(prof_atual).strip()))
+        
+    return pares
+
 def extrair_horario_inteligente(arquivo_pdf, turma_alvo):
     dias = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta"]
-    resultado = []
+    horarios_padrao = ["13:00", "13:45", "14:30", "15:30", "16:15", "17:00"]
+    
+    # Cria uma grade em branco perfeita
+    grade = {h: {d: {"materia": "Livre", "prof": ""} for d in dias} for h in horarios_padrao}
     
     with pdfplumber.open(arquivo_pdf) as pdf:
         for page in pdf.pages:
@@ -22,54 +58,61 @@ def extrair_horario_inteligente(arquivo_pdf, turma_alvo):
             
             tabelas = page.extract_tables()
             for tabela in tabelas:
-                # Verifica se é o cabeçalho correto
                 if not tabela or not tabela[0] or "Hor" not in str(tabela[0][0]):
                     continue
                     
+                current_times = []
                 for linha in tabela[1:]:
-                    texto_horario = str(linha[0]) if linha[0] else ""
-                    horarios = [h.strip() for h in texto_horario.split("\n") if ":" in h]
+                    texto_horario = str(linha[0]).strip() if linha[0] else ""
+                    horarios_na_linha = [h.strip() for h in texto_horario.split("\n") if ":" in h]
                     
-                    for index_horario, h in enumerate(horarios):
-                        linha_formatada = {"Horário": h}
+                    is_continuation = False
+                    if horarios_na_linha:
+                        current_times = horarios_na_linha
+                    else:
+                        is_continuation = True # É a linha do professor que o PDF cortou
                         
-                        for i, dia in enumerate(dias):
-                            col = i + 1
-                            celula = str(linha[col]) if col < len(linha) and linha[col] else ""
-                            
-                            # Limpa os espaços em branco extras dentro da célula
-                            linhas_celula = [x.strip() for x in celula.split("\n") if x.strip()]
-                            
-                            # Lógica à prova de falhas: Matéria fica na linha PAR, Professor na linha ÍMPAR
-                            idx_materia = index_horario * 2
-                            idx_prof = idx_materia + 1
-                            
-                            # Tenta pegar a matéria e o professor; se falhar, usa um padrão
-                            materia_crua = linhas_celula[idx_materia] if idx_materia < len(linhas_celula) else "Livre"
-                            prof_cru = linhas_celula[idx_prof] if idx_prof < len(linhas_celula) else "Não Informado"
-                            
-                            sigla = materia_crua.split(" ")[0].upper()
-                            
-                            if sigla and sigla != "LIVRE":
-                                materia_nome = SIGLAS.get(sigla, materia_crua.title())
-                                # Força a união com a barra "|" para o React conseguir separar depois
-                                linha_formatada[dia] = f"{materia_nome} | {prof_cru.title()}"
-                            else:
-                                linha_formatada[dia] = "Livre"
+                    for i, dia in enumerate(dias):
+                        col = i + 1
+                        celula = str(linha[col]) if col < len(linha) and linha[col] else ""
+                        pares = parse_cell(celula)
                         
-                        resultado.append(linha_formatada)
+                        if is_continuation:
+                            for idx, (sub, prof) in enumerate(pares):
+                                if idx < len(current_times) and prof:
+                                    h = current_times[idx]
+                                    grade[h][dia]["prof"] = (grade[h][dia]["prof"] + " " + prof).strip()
+                        else:
+                            for idx, (sub, prof) in enumerate(pares):
+                                if idx < len(current_times):
+                                    h = current_times[idx]
+                                    if sub: grade[h][dia]["materia"] = sub
+                                    if prof: grade[h][dia]["prof"] = prof
+                                        
+                # Formata exatamente do jeito que o React precisa
+                resultado = []
+                for h in horarios_padrao:
+                    linha_formatada = {"Horário": h}
+                    for d in dias:
+                        mat = grade[h][d]["materia"]
+                        prof = grade[h][d]["prof"]
+                        if mat == "Livre" or not mat:
+                            linha_formatada[d] = "Livre"
+                        else:
+                            p_nome = prof.title() if prof else "Não Informado"
+                            linha_formatada[d] = f"{mat} | {p_nome}"
+                    resultado.append(linha_formatada)
                 
-                if resultado:
-                    return pd.DataFrame(resultado)
+                return pd.DataFrame(resultado)
     return None
 
 st.set_page_config(page_title="Leitor de Horário Escolar", layout="centered")
 
-# Lembre-se de colocar o link do seu site principal aqui!
+# Lembre-se de colocar o link do seu site da Vercel aqui!
 st.link_button("⬅️ Voltar para o App Principal", "https://app-organizacao-escolar.vercel.app/")
 
 st.title("📚 Extrator de Horários Automático")
-st.write("Arraste seu PDF gerado pelo Urania. O sistema mapeará as matérias e os professores automaticamente.")
+st.write("Arraste seu PDF gerado pelo Urania. O sistema mapeará as matérias e os professores perfeitamente.")
 
 arquivo_enviado = st.file_uploader("Arraste e solte o seu PDF aqui", type=["pdf"])
 turma_selecionada = st.selectbox("Selecione sua Turma:", [
@@ -82,7 +125,7 @@ if st.button("Extrair Meu Horário"):
             df_horario = extrair_horario_inteligente(arquivo_enviado, turma_selecionada)
             
             if df_horario is not None and not df_horario.empty:
-                st.success(f"🎉 Horário da Turma {turma_selecionada} mapeado!")
+                st.success(f"🎉 Horário da Turma {turma_selecionada} mapeado com sucesso!")
                 st.dataframe(df_horario, use_container_width=True)
                 
                 st.download_button(
